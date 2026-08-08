@@ -1832,10 +1832,11 @@
 <div class="login" id="login">
   <div class="orb"></div>
   <h1>Claude</h1>
-  <p class="sub">输入连接密钥,进入你和Claude的频道。</p>
+  <p class="sub">输入模型地址、API Key 和模型名,进入你和Claude的频道。</p>
   <form id="loginForm" autocomplete="off">
-    <input id="apiKeyInput" type="password" inputmode="text" placeholder="API Key" autocomplete="off" spellcheck="false">
-    <input id="secretInput" type="password" inputmode="text" placeholder="连接密钥" autocomplete="off" spellcheck="false">
+    <input id="llmBaseInput" type="url" inputmode="url" placeholder="模型接口地址，如 https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
+    <input id="apiKeyInput" type="password" inputmode="text" placeholder="模型 API Key" autocomplete="off" spellcheck="false">
+    <input id="secretInput" type="text" inputmode="text" placeholder="模型名，如 deepseek-chat" autocomplete="off" spellcheck="false">
     <button type="submit">连接</button>
     <p class="err" id="loginErr"></p>
   </form>
@@ -2237,13 +2238,18 @@ const CONFIG = {
 const AI_NAME = CONFIG.AI_NAME, HUMAN_NAME = CONFIG.HUMAN_NAME, APP_NAME = CONFIG.APP_NAME;
 
 const API_BASE = "/relay";       // same-origin; nginx mounts the relay here (RELAY_PUBLIC_PREFIX)
-const USE_MOCK  = true;           // true = self-contained demo with fake data (no backend needed)
+const DIRECT_LLM = true;          // true = 纯前端直连 OpenAI 兼容模型接口
+const USE_MOCK  = false;          // true = self-contained demo with fake data (no backend needed)
 const LS_KEY    = "companion_secret";
 const APIKEY_LS = "companion_apikey";
+const LLM_BASE_LS = "companion_llm_base";
+const LLM_MODEL_LS = "companion_llm_model";
 
 /* ── 状态 ── */
-let secret  = localStorage.getItem(LS_KEY);
-let apiKey  = localStorage.getItem(APIKEY_LS);
+let secret  = localStorage.getItem(LS_KEY);       // relay 连接密钥；DIRECT_LLM 模式下兼容旧字段，不使用
+let apiKey  = localStorage.getItem(APIKEY_LS);    // DIRECT_LLM 模式下为模型 API Key
+let llmBase = localStorage.getItem(LLM_BASE_LS);
+let llmModel = localStorage.getItem(LLM_MODEL_LS);
 let lastId  = 0;
 const seen  = new Set();
 let es      = null;     // EventSource(或 MockEventSource)
@@ -2361,7 +2367,7 @@ function applyIdentity(){
   const setText = (sel, val) => { const el = document.querySelector(sel); if (el) el.textContent = val; };
   const setAttr = (sel, a, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(a, val); };
   setText(".login h1", AI_NAME);
-  setText(".login .sub", "输入 API Key 和连接密钥，进入你和" + AI_NAME + "的频道。");
+  setText(".login .sub", "输入模型地址、API Key 和模型名，进入你和" + AI_NAME + "的频道。");
   const emp = document.querySelector("#empty p"); if (emp) emp.innerHTML = "这里只有你和" + AI_NAME + "。<br>说点什么吧。";
   setText(".call-name", AI_NAME);
   setAttr("#callAvatarImg", "aria-label", AI_NAME);
@@ -3599,7 +3605,46 @@ async function apiNewerHistory(since, limit = 200){
   return sessionFiltered(rows);
 }
 
+function directLlmHistory(){
+  return sortedMessages()
+    .filter((m) => (m.from === "human" || m.from === "ai") && (m.kind === "user" || m.kind === "reply") && m.text)
+    .slice(-20)
+    .map((m) => ({ role: m.from === "human" ? "user" : "assistant", content: m.text }));
+}
+
+async function directLlmSend(text){
+  const base = (llmBase || "").replace(/\/+$/, "");
+  const model = (llmModel || "").trim();
+  const key = (apiKey || "").trim();
+  if (!base || !model || !key) throw new Error("direct_llm_config_missing");
+  showTyping();
+  const messages = directLlmHistory();
+  messages.push({ role:"user", content:text || "" });
+  const r = await fetch(`${base}/chat/completions`, {
+    method:"POST",
+    headers:{
+      "Authorization":"Bearer " + key,
+      "Content-Type":"application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0.7,
+      stream: false
+    })
+  });
+  if (!r.ok) throw new Error("llm " + r.status);
+  const d = await r.json();
+  const answer = (((d.choices || [])[0] || {}).message || {}).content || "";
+  const id = Date.now();
+  setTimeout(() => {
+    onMessage({ id, ts:new Date().toISOString(), from:"ai", kind:"reply", text:answer || "（空回复）", meta:{} });
+  }, 80);
+  return { id: "local-" + id };
+}
+
 async function apiSend(text, attachments){
+  if (DIRECT_LLM) return directLlmSend(text);
   if (USE_MOCK) return Mock.send(text);
   const payload = { text: text || "" };
   const sid = effectiveApiSession();
@@ -3686,6 +3731,7 @@ async function apiTts(text){
 
 async function apiHealth(){
   try{
+    if (DIRECT_LLM) return !!(llmBase && apiKey && llmModel);
     if (USE_MOCK) return !!Mock.health().ok;
     const r = await fetch(`${API_BASE}/healthz`, { headers: authHeaders() });
     if (r.status === 401){ handle401(); return false; }
@@ -3697,6 +3743,7 @@ function markStreamEvent(){ lastStreamEventAt = Date.now(); }
 function openStream(){
   if (es){ try{ es.close(); }catch(e){} es = null; }
   markStreamEvent();
+  if (DIRECT_LLM){ connected = true; setConn("online"); return; }
   if (USE_MOCK){
     es = new MockEventSource();
   } else {
@@ -5547,8 +5594,12 @@ if (clipBtn && clipInput){
 function handle401(){
   secret = null;
   apiKey = null;
+  llmBase = null;
+  llmModel = null;
   localStorage.removeItem(LS_KEY);
   localStorage.removeItem(APIKEY_LS);
+  localStorage.removeItem(LLM_BASE_LS);
+  localStorage.removeItem(LLM_MODEL_LS);
   if (es){ try{ es.close(); }catch(e){} es = null; }
   if (healthTimer){ clearInterval(healthTimer); healthTimer = null; }
   showLogin("密钥不对,请重新输入。");
@@ -5558,27 +5609,34 @@ function showLogin(msg){
   appEl.classList.add("hidden");
   loginEl.classList.remove("hidden");
   $("#loginErr").textContent = msg || "";
-  $("#secretInput").value = "";
-  $("#apiKeyInput").value = "";
-  setTimeout(() => $("#apiKeyInput").focus(), 80);
+  $("#secretInput").value = llmModel || "";
+  $("#apiKeyInput").value = apiKey || "";
+  $("#llmBaseInput").value = llmBase || "";
+  setTimeout(() => $("#llmBaseInput").focus(), 80);
 }
 
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const val = $("#secretInput").value.trim();
   const akey = $("#apiKeyInput").value.trim();
-  if (!val && !akey) return;
+  const lbase = $("#llmBaseInput").value.trim();
+  if (DIRECT_LLM && (!lbase || !akey || !val)){ $("#loginErr").textContent = "请填完整模型地址、API Key 和模型名。"; return; }
+  if (!DIRECT_LLM && !val && !akey) return;
   const btn = e.target.querySelector("button");
   btn.disabled = true; btn.textContent = "连接中…";
   secret = val;
   apiKey = akey;
+  llmBase = lbase;
+  llmModel = val;
   try{
     // 用 history 验证密钥(401 会抛错)
     await loadSessions();
     loadBrain();
-    const msgs = await apiLatestHistory();
+    const msgs = DIRECT_LLM ? [] : await apiLatestHistory();
     localStorage.setItem(LS_KEY, secret);
     localStorage.setItem(APIKEY_LS, apiKey);
+    localStorage.setItem(LLM_BASE_LS, llmBase);
+    localStorage.setItem(LLM_MODEL_LS, llmModel);
     startChat(msgs);
   }catch(err){
     secret = null;
@@ -5636,9 +5694,12 @@ function startChat(initialMsgs, { connect = true, fromCache = false } = {}){
 }
 
 async function init(){
-  if (!USE_MOCK && !secret && !apiKey){ showLogin(); return; }
-  await loadSessions();
-  loadBrain();
+  if (DIRECT_LLM && (!llmBase || !apiKey || !llmModel)){ showLogin(); return; }
+  if (!DIRECT_LLM && !USE_MOCK && !secret && !apiKey){ showLogin(); return; }
+  if (!DIRECT_LLM){
+    await loadSessions();
+    loadBrain();
+  }
   let showedCache = false;
   const cached = await readCachedMessages();
   if (cached.length){
