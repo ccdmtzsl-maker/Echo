@@ -5636,7 +5636,7 @@ function startChat(initialMsgs, { connect = true, fromCache = false } = {}){
 }
 
 async function init(){
-  if (!secret && !apiKey){ showLogin(); return; }
+  if (!USE_MOCK && !secret && !apiKey){ showLogin(); return; }
   await loadSessions();
   loadBrain();
   let showedCache = false;
