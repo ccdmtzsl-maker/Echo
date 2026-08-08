@@ -1834,6 +1834,7 @@
   <h1>Claude</h1>
   <p class="sub">输入连接密钥,进入你和Claude的频道。</p>
   <form id="loginForm" autocomplete="off">
+    <input id="apiKeyInput" type="password" inputmode="text" placeholder="API Key" autocomplete="off" spellcheck="false">
     <input id="secretInput" type="password" inputmode="text" placeholder="连接密钥" autocomplete="off" spellcheck="false">
     <button type="submit">连接</button>
     <p class="err" id="loginErr"></p>
@@ -2238,9 +2239,11 @@ const AI_NAME = CONFIG.AI_NAME, HUMAN_NAME = CONFIG.HUMAN_NAME, APP_NAME = CONFI
 const API_BASE = "/relay";       // same-origin; nginx mounts the relay here (RELAY_PUBLIC_PREFIX)
 const USE_MOCK  = false;          // true = self-contained demo with fake data (no backend needed)
 const LS_KEY    = "companion_secret";
+const APIKEY_LS = "companion_apikey";
 
 /* ── 状态 ── */
 let secret  = localStorage.getItem(LS_KEY);
+let apiKey  = localStorage.getItem(APIKEY_LS);
 let lastId  = 0;
 const seen  = new Set();
 let es      = null;     // EventSource(或 MockEventSource)
@@ -2358,7 +2361,7 @@ function applyIdentity(){
   const setText = (sel, val) => { const el = document.querySelector(sel); if (el) el.textContent = val; };
   const setAttr = (sel, a, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(a, val); };
   setText(".login h1", AI_NAME);
-  setText(".login .sub", "输入连接密钥，进入你和" + AI_NAME + "的频道。");
+  setText(".login .sub", "输入 API Key 和连接密钥，进入你和" + AI_NAME + "的频道。");
   const emp = document.querySelector("#empty p"); if (emp) emp.innerHTML = "这里只有你和" + AI_NAME + "。<br>说点什么吧。";
   setText(".call-name", AI_NAME);
   setAttr("#callAvatarImg", "aria-label", AI_NAME);
@@ -3168,7 +3171,7 @@ function setBrainUi(target){
     : "现在由 Claude Code channel 接消息";
 }
 async function loadBrain(){
-  if (USE_MOCK || !secret){ setBrainUi("desktop"); return; }
+  if (USE_MOCK || (!secret && !apiKey)){ setBrainUi("desktop"); return; }
   try{
     const r = await fetch(`${API_BASE}/app/brain`, { headers: authHeaders() });
     if (!r.ok) throw new Error("brain " + r.status);
@@ -3374,7 +3377,12 @@ class MockEventSource{
 }
 
 /* ════════════ API 层 ════════════ */
-function authHeaders(){ return { "Authorization": "Bearer " + secret }; }
+function authHeaders(){
+  const h = {};
+  if (apiKey) h["X-API-Key"] = apiKey;
+  if (secret) h["Authorization"] = "Bearer " + secret;
+  return h;
+}
 
 function activeSessionObj(){
   return apiSessions.find((s) => s.id === activeApiSession) || null;
@@ -3412,7 +3420,7 @@ function setSessionPopover(open){
   if (sessionPop) sessionPop.hidden = !open;
 }
 async function loadSessions(){
-  if (USE_MOCK || !secret){ activeApiSession = LEGACY_SESSION_ID; renderSessionList(); return; }
+  if (USE_MOCK || (!secret && !apiKey)){ activeApiSession = LEGACY_SESSION_ID; renderSessionList(); return; }
   try{
     const r = await fetch(`${API_BASE}/app/sessions`, { headers: authHeaders() });
     if (!r.ok) throw new Error("sessions " + r.status);
@@ -3692,7 +3700,10 @@ function openStream(){
   if (USE_MOCK){
     es = new MockEventSource();
   } else {
-    es = new EventSource(`${API_BASE}/app/stream?token=${encodeURIComponent(secret)}`);
+    const sseParams = new URLSearchParams();
+    if (secret) sseParams.set("token", secret);
+    if (apiKey) sseParams.set("apikey", apiKey);
+    es = new EventSource(`${API_BASE}/app/stream?${sseParams.toString()}`);
   }
   es.onopen = () => { connected = true; markStreamEvent(); setConn("online"); backfill(); };
   es.onmessage = (e) => {
@@ -3947,7 +3958,10 @@ function attImgError(img){
 function attUrl(u){
   if (!u) return "";
   if (/^blob:|^data:/.test(u)) return u;
-  return u + (u.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(secret || "");
+  const attParams = new URLSearchParams();
+  if (secret) attParams.set("token", secret);
+  if (apiKey) attParams.set("apikey", apiKey);
+  return u + (u.indexOf("?") >= 0 ? "&" : "?") + attParams.toString();
 }
 function fmtSize(n){
   n = Number(n) || 0;
@@ -5532,7 +5546,9 @@ if (clipBtn && clipInput){
 /* ════════════ 登录 / 401 ════════════ */
 function handle401(){
   secret = null;
+  apiKey = null;
   localStorage.removeItem(LS_KEY);
+  localStorage.removeItem(APIKEY_LS);
   if (es){ try{ es.close(); }catch(e){} es = null; }
   if (healthTimer){ clearInterval(healthTimer); healthTimer = null; }
   showLogin("密钥不对,请重新输入。");
@@ -5543,22 +5559,26 @@ function showLogin(msg){
   loginEl.classList.remove("hidden");
   $("#loginErr").textContent = msg || "";
   $("#secretInput").value = "";
-  setTimeout(() => $("#secretInput").focus(), 80);
+  $("#apiKeyInput").value = "";
+  setTimeout(() => $("#apiKeyInput").focus(), 80);
 }
 
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const val = $("#secretInput").value.trim();
-  if (!val) return;
+  const akey = $("#apiKeyInput").value.trim();
+  if (!val && !akey) return;
   const btn = e.target.querySelector("button");
   btn.disabled = true; btn.textContent = "连接中…";
   secret = val;
+  apiKey = akey;
   try{
     // 用 history 验证密钥(401 会抛错)
     await loadSessions();
     loadBrain();
     const msgs = await apiLatestHistory();
     localStorage.setItem(LS_KEY, secret);
+    localStorage.setItem(APIKEY_LS, apiKey);
     startChat(msgs);
   }catch(err){
     secret = null;
@@ -5616,7 +5636,7 @@ function startChat(initialMsgs, { connect = true, fromCache = false } = {}){
 }
 
 async function init(){
-  if (!secret){ showLogin(); return; }
+  if (!secret && !apiKey){ showLogin(); return; }
   await loadSessions();
   loadBrain();
   let showedCache = false;
