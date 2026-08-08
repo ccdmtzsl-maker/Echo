@@ -3624,6 +3624,7 @@ async function directLlmSend(text){
     method:"POST",
     headers:{
       "Authorization":"Bearer " + key,
+      "X-API-Key": key,
       "Content-Type":"application/json"
     },
     body: JSON.stringify({
