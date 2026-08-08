@@ -3607,7 +3607,7 @@ async function apiNewerHistory(since, limit = 200){
 
 function directLlmHistory(){
   return sortedMessages()
-    .filter((m) => (m.from === "human" || m.from === "ai") && (m.kind === "user" || m.kind === "reply") && m.text)
+    .filter((m) => (m.from === "human" || m.from === "ai") && (m.kind === "user" || m.kind === "reply") && m.text && m.status !== "sending" && m.status !== "failed" && !String(m.id || "").startsWith("pending-"))
     .slice(-20)
     .map((m) => ({ role: m.from === "human" ? "user" : "assistant", content: m.text }));
 }
@@ -3678,6 +3678,7 @@ async function apiUpload(blob, name, mime){
 async function apiVoiceText(text, meta = {}){
   const clean = String(text || "").trim();
   if (!clean) return null;
+  if (DIRECT_LLM) throw new Error("direct_llm_voice_unsupported");
   if (USE_MOCK) return Mock.send(clean);
   const r = await fetch(`${API_BASE}/app/voice`, {
     method: "POST",
@@ -3691,6 +3692,7 @@ async function apiVoiceText(text, meta = {}){
 
 async function apiVoiceBlob(blob, mime, meta = {}){
   if (!blob || !blob.size) return null;
+  if (DIRECT_LLM) throw new Error("direct_llm_voice_unsupported");
   if (USE_MOCK) return Mock.send("[语音通话] " + fmtSize(blob.size));
   const qs = new URLSearchParams({ name: "voice.webm" });
   if (meta.call_id) qs.set("call_id", meta.call_id);
@@ -3706,6 +3708,7 @@ async function apiVoiceBlob(blob, mime, meta = {}){
 }
 
 async function apiCallEvent(action, meta = {}){
+  if (DIRECT_LLM) return { ok:true };
   if (USE_MOCK) return { ok:true };
   const r = await fetch(`${API_BASE}/app/call`, {
     method: "POST",
@@ -3718,7 +3721,7 @@ async function apiCallEvent(action, meta = {}){
 }
 
 async function apiTts(text){
-  if (!text || USE_MOCK) return null;
+  if (!text || DIRECT_LLM || USE_MOCK) return null;
   const r = await fetch(`${API_BASE}/app/tts`, {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -4186,6 +4189,8 @@ async function terminalSend(){
   }catch(err){
     dropPendingOutgoing(tempKey);
     if (String(err.message) === "401") return;
+    if (String(err.message) === "direct_llm_config_missing") showToast("请先填写模型地址、API Key 和模型名");
+    else if (String(err.message).startsWith("llm ")) showToast("模型请求失败：" + String(err.message).slice(4));
     setMessage({ ...optimistic, status:"failed" });
   }
 }
@@ -5629,9 +5634,11 @@ $("#loginForm").addEventListener("submit", async (e) => {
   llmBase = lbase;
   llmModel = val;
   try{
-    // 用 history 验证密钥(401 会抛错)
-    await loadSessions();
-    loadBrain();
+    // DIRECT_LLM 模式不请求 relay；非直连模式才用 history 验证密钥(401 会抛错)
+    if (!DIRECT_LLM){
+      await loadSessions();
+      loadBrain();
+    }
     const msgs = DIRECT_LLM ? [] : await apiLatestHistory();
     localStorage.setItem(LS_KEY, secret);
     localStorage.setItem(APIKEY_LS, apiKey);
@@ -5649,6 +5656,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
 /* ════════════ 启动 ════════════ */
 function startRealtime(){
   openStream();
+  if (DIRECT_LLM) return;
 
   if (streamWatchTimer) clearInterval(streamWatchTimer);
   streamWatchTimer = setInterval(() => {
