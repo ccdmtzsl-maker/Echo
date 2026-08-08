@@ -1832,10 +1832,11 @@
 <div class="login" id="login">
   <div class="orb"></div>
   <h1>Claude</h1>
-  <p class="sub">输入模型地址、API Key 和模型名,进入你和Claude的频道。</p>
+  <p class="sub">输入模型地址、Bearer Key、X-API-Key 和模型名,进入你和Claude的频道。</p>
   <form id="loginForm" autocomplete="off">
     <input id="llmBaseInput" type="url" inputmode="url" placeholder="模型接口地址，如 https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
-    <input id="apiKeyInput" type="password" inputmode="text" placeholder="模型 API Key" autocomplete="off" spellcheck="false">
+    <input id="bearerKeyInput" type="password" inputmode="text" placeholder="Bearer Key，用于 Authorization" autocomplete="off" spellcheck="false">
+    <input id="apiKeyInput" type="password" inputmode="text" placeholder="X-API-Key" autocomplete="off" spellcheck="false">
     <input id="secretInput" type="text" inputmode="text" placeholder="模型名，如 deepseek-chat" autocomplete="off" spellcheck="false">
     <button type="submit">连接</button>
     <p class="err" id="loginErr"></p>
@@ -2242,12 +2243,14 @@ const DIRECT_LLM = true;          // true = 纯前端直连 OpenAI 兼容模型�
 const USE_MOCK  = false;          // true = self-contained demo with fake data (no backend needed)
 const LS_KEY    = "companion_secret";
 const APIKEY_LS = "companion_apikey";
+const BEARER_KEY_LS = "companion_bearer_key";
 const LLM_BASE_LS = "companion_llm_base";
 const LLM_MODEL_LS = "companion_llm_model";
 
 /* ── 状态 ── */
 let secret  = localStorage.getItem(LS_KEY);       // relay 连接密钥；DIRECT_LLM 模式下兼容旧字段，不使用
-let apiKey  = localStorage.getItem(APIKEY_LS);    // DIRECT_LLM 模式下为模型 API Key
+let apiKey  = localStorage.getItem(APIKEY_LS);    // DIRECT_LLM 模式下为 X-API-Key
+let bearerKey = localStorage.getItem(BEARER_KEY_LS);
 let llmBase = localStorage.getItem(LLM_BASE_LS);
 let llmModel = localStorage.getItem(LLM_MODEL_LS);
 let lastId  = 0;
@@ -2367,7 +2370,7 @@ function applyIdentity(){
   const setText = (sel, val) => { const el = document.querySelector(sel); if (el) el.textContent = val; };
   const setAttr = (sel, a, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(a, val); };
   setText(".login h1", AI_NAME);
-  setText(".login .sub", "输入模型地址、API Key 和模型名，进入你和" + AI_NAME + "的频道。");
+  setText(".login .sub", "输入模型地址、Bearer Key、X-API-Key 和模型名，进入你和" + AI_NAME + "的频道。");
   const emp = document.querySelector("#empty p"); if (emp) emp.innerHTML = "这里只有你和" + AI_NAME + "。<br>说点什么吧。";
   setText(".call-name", AI_NAME);
   setAttr("#callAvatarImg", "aria-label", AI_NAME);
@@ -3615,16 +3618,17 @@ function directLlmHistory(){
 async function directLlmSend(text){
   const base = (llmBase || "").replace(/\/+$/, "");
   const model = (llmModel || "").trim();
-  const key = (apiKey || "").trim();
-  if (!base || !model || !key) throw new Error("direct_llm_config_missing");
+  const bearer = (bearerKey || "").trim();
+  const xKey = (apiKey || "").trim();
+  if (!base || !model || !bearer || !xKey) throw new Error("direct_llm_config_missing");
   showTyping();
   const messages = directLlmHistory();
   messages.push({ role:"user", content:text || "" });
   const r = await fetch(`${base}/chat/completions`, {
     method:"POST",
     headers:{
-      "Authorization":"Bearer " + key,
-      "X-API-Key": key,
+      "Authorization":"Bearer " + bearer,
+      "X-API-Key": xKey,
       "Content-Type":"application/json"
     },
     body: JSON.stringify({
@@ -3735,7 +3739,7 @@ async function apiTts(text){
 
 async function apiHealth(){
   try{
-    if (DIRECT_LLM) return !!(llmBase && apiKey && llmModel);
+    if (DIRECT_LLM) return !!(llmBase && bearerKey && apiKey && llmModel);
     if (USE_MOCK) return !!Mock.health().ok;
     const r = await fetch(`${API_BASE}/healthz`, { headers: authHeaders() });
     if (r.status === 401){ handle401(); return false; }
@@ -5600,10 +5604,12 @@ if (clipBtn && clipInput){
 function handle401(){
   secret = null;
   apiKey = null;
+  bearerKey = null;
   llmBase = null;
   llmModel = null;
   localStorage.removeItem(LS_KEY);
   localStorage.removeItem(APIKEY_LS);
+  localStorage.removeItem(BEARER_KEY_LS);
   localStorage.removeItem(LLM_BASE_LS);
   localStorage.removeItem(LLM_MODEL_LS);
   if (es){ try{ es.close(); }catch(e){} es = null; }
@@ -5617,6 +5623,7 @@ function showLogin(msg){
   $("#loginErr").textContent = msg || "";
   $("#secretInput").value = llmModel || "";
   $("#apiKeyInput").value = apiKey || "";
+  $("#bearerKeyInput").value = bearerKey || "";
   $("#llmBaseInput").value = llmBase || "";
   setTimeout(() => $("#llmBaseInput").focus(), 80);
 }
@@ -5625,13 +5632,15 @@ $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const val = $("#secretInput").value.trim();
   const akey = $("#apiKeyInput").value.trim();
+  const bkey = $("#bearerKeyInput").value.trim();
   const lbase = $("#llmBaseInput").value.trim();
-  if (DIRECT_LLM && (!lbase || !akey || !val)){ $("#loginErr").textContent = "请填完整模型地址、API Key 和模型名。"; return; }
+  if (DIRECT_LLM && (!lbase || !bkey || !akey || !val)){ $("#loginErr").textContent = "请填完整模型地址、Bearer Key、X-API-Key 和模型名。"; return; }
   if (!DIRECT_LLM && !val && !akey) return;
   const btn = e.target.querySelector("button");
   btn.disabled = true; btn.textContent = "连接中…";
   secret = val;
   apiKey = akey;
+  bearerKey = bkey;
   llmBase = lbase;
   llmModel = val;
   try{
@@ -5643,6 +5652,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
     const msgs = DIRECT_LLM ? [] : await apiLatestHistory();
     localStorage.setItem(LS_KEY, secret);
     localStorage.setItem(APIKEY_LS, apiKey);
+    localStorage.setItem(BEARER_KEY_LS, bearerKey);
     localStorage.setItem(LLM_BASE_LS, llmBase);
     localStorage.setItem(LLM_MODEL_LS, llmModel);
     startChat(msgs);
@@ -5703,7 +5713,7 @@ function startChat(initialMsgs, { connect = true, fromCache = false } = {}){
 }
 
 async function init(){
-  if (DIRECT_LLM && (!llmBase || !apiKey || !llmModel)){ showLogin(); return; }
+  if (DIRECT_LLM && (!llmBase || !bearerKey || !apiKey || !llmModel)){ showLogin(); return; }
   if (!DIRECT_LLM && !USE_MOCK && !secret && !apiKey){ showLogin(); return; }
   if (!DIRECT_LLM){
     await loadSessions();
